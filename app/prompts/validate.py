@@ -37,7 +37,22 @@ For EACH item above:
                 web_value, and delta
 
 Then CHECK: did the first pass MISS any differences in this region?
-If yes, add them as new items.
+Look specifically for:
+  □ Missing buttons or icons (especially action buttons like Create, Add, etc.)
+  □ Missing icons INSIDE buttons (+ plus signs, arrows)
+  □ Color differences in badges/status indicators
+  □ Missing filter controls or dropdowns
+  □ Table column differences
+If found, add them as new items with confidence 0.90+.
+
+BOUNDING BOX (must be accurate for annotation):
+  For each diff, provide the bounding_box of the element in the WEB image.
+  Use normalized coordinates (0-1000 scale):
+    • x: left edge (0 = left of image, 1000 = right)
+    • y: top edge (0 = top of image, 1000 = bottom)
+    • width, height: element dimensions (0-1000)
+  
+  For MISSING elements, estimate where it SHOULD appear in the web image.
 
 IMPORTANT:
   • FIGMA IS THE SOURCE OF TRUTH
@@ -58,7 +73,8 @@ Respond with ONLY the JSON (no markdown):
       "delta": "...",
       "severity": "critical|major|minor",
       "confidence": 0.0,
-      "region": "{region}"
+      "region": "{region}",
+      "bounding_box": {{"x": 100, "y": 50, "width": 200, "height": 40}}
     }}
   ]
 }}

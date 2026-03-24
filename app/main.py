@@ -15,7 +15,7 @@ import time
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.schemas import CompareAPIResponse
 from app.pipeline import run_comparison
@@ -74,9 +74,13 @@ async def clear_cache():
 async def compare(
     figma: UploadFile = File(..., description="Figma design screenshot (PNG/JPG)"),
     web: UploadFile = File(..., description="Web page screenshot (PNG/JPG)"),
+    fast_mode: bool = Query(
+        False,
+        description="Skip inventory pass. Set true for faster but potentially less thorough results.",
+    ),
     skip_validation: bool = Query(
         False,
-        description="Skip Pass 3 (validation). Faster but may include more false positives.",
+        description="Skip validation pass. Set true for faster but less accurate results.",
     ),
     skip_cache: bool = Query(
         False,
@@ -90,9 +94,19 @@ async def compare(
     confidence scores, and calculated deltas.
     
     Features:
+    - Full 3-pass analysis: Inventory → Comparison → Validation (default)
     - Automatic caching of results (use skip_cache=true to bypass)
-    - Retry with exponential backoff on API failures
-    - Parallel processing for faster results
+    - Annotated web image with diff markers (retrievable via /compare/{comparison_id}/image)
+    
+    Pipeline:
+    - Pass 1: Element inventory (identifies all UI elements in both images)
+    - Pass 2: Detailed comparison (finds differences with bounding boxes)
+    - Pass 3: Validation (filters false positives, catches missed items)
+    
+    Speed options:
+    - Default (full mode): ~2-3min (most accurate)
+    - fast_mode=true: ~60-90s (skips inventory)
+    - fast_mode=true, skip_validation=true: ~30-60s (fastest, least accurate)
     """
     # ── Validate uploads ─────────────────────────────────────────────────
     for label, f in [("figma", figma), ("web", web)]:
@@ -123,6 +137,7 @@ async def compare(
         result = await run_comparison(
             figma_bytes,
             web_bytes,
+            skip_inventory=fast_mode,
             skip_validation=skip_validation,
             skip_cache=skip_cache,
         )
@@ -141,3 +156,38 @@ async def compare(
     )
 
     return result
+
+
+@app.get("/compare/{comparison_id}/image")
+async def get_annotated_image(comparison_id: str):
+    """
+    Retrieve the annotated web image for a comparison.
+    
+    The annotated image shows red bounding boxes around each detected
+    difference, with numbered markers matching the diff_ids in the
+    comparison response.
+    
+    Args:
+        comparison_id: The comparison_id returned from /compare endpoint
+        
+    Returns:
+        PNG image with annotations
+    """
+    cache = get_cache()
+    image_bytes = cache.get_annotated_image(comparison_id)
+    
+    if image_bytes is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Annotated image not found for comparison_id: {comparison_id[:16]}... "
+                   f"The comparison may have been evicted from cache or no annotations were generated.",
+        )
+    
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={
+            "Content-Disposition": f'inline; filename="annotated_{comparison_id[:16]}.png"',
+            "Cache-Control": "public, max-age=3600",
+        },
+    )

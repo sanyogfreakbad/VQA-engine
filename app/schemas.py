@@ -57,6 +57,14 @@ class InventoryResponse(BaseModel):
 # ── Pass 2 — Detailed Comparison ─────────────────────────────────────────────
 
 
+class BoundingBox(BaseModel):
+    """Normalized bounding box coordinates (0-1000 scale)."""
+    x: int = Field(ge=0, le=1000, description="Left edge X coordinate (0-1000)")
+    y: int = Field(ge=0, le=1000, description="Top edge Y coordinate (0-1000)")
+    width: int = Field(ge=0, le=1000, description="Width (0-1000)")
+    height: int = Field(ge=0, le=1000, description="Height (0-1000)")
+
+
 class DiffItem(BaseModel):
     element: str = Field(description="Element name / identifier")
     text: str = Field(description="Visible text or short description")
@@ -68,6 +76,10 @@ class DiffItem(BaseModel):
     severity: Severity
     confidence: float = Field(ge=0.0, le=1.0, description="LLM confidence 0-1")
     region: str = Field(description="UI region this element belongs to")
+    bounding_box: Optional[BoundingBox] = Field(
+        default=None,
+        description="Bounding box of the element in the web image (normalized 0-1000 scale)"
+    )
 
 
 class ComparisonResponse(BaseModel):
@@ -88,10 +100,16 @@ class CategoryDiffItem(BaseModel):
     web_value: str = Field(description="Value observed in the web screenshot")
     delta: str = Field(description="Human-readable difference, e.g. '+8px', '700 → 400'")
     severity: Severity
+    diff_id: int = Field(description="Unique incremental ID for this diff, used for image annotation")
+    bounding_box: Optional[BoundingBox] = Field(
+        default=None,
+        description="Bounding box of the element in the web image (normalized 0-1000 scale)"
+    )
 
 
 class CompareAPIResponse(BaseModel):
     """What the /compare endpoint returns."""
+    comparison_id: str = Field(description="SHA256 hash of figma + web images, used to retrieve annotated image")
     total_diffs: int
     by_severity: dict[str, int] = Field(description="Count per severity level")
     by_type: dict[str, int] = Field(description="Count per diff type")
@@ -100,6 +118,10 @@ class CompareAPIResponse(BaseModel):
         description="Diffs grouped by diff_type for easier table mapping"
     )
     summary: str
+    annotated_image: Optional[str] = Field(
+        default=None,
+        description="Path or indicator for the annotated web image with diff markers"
+    )
 
 
 # ── Validation pass ──────────────────────────────────────────────────────────
@@ -145,6 +167,17 @@ def get_inventory_schema() -> types.Schema:
 
 def get_comparison_schema() -> types.Schema:
     """Build Gemini schema for Pass 2 (Comparison) response."""
+    bounding_box = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "x": types.Schema(type=types.Type.INTEGER),
+            "y": types.Schema(type=types.Type.INTEGER),
+            "width": types.Schema(type=types.Type.INTEGER),
+            "height": types.Schema(type=types.Type.INTEGER),
+        },
+        required=["x", "y", "width", "height"],
+    )
+    
     diff_item = types.Schema(
         type=types.Type.OBJECT,
         properties={
@@ -164,8 +197,9 @@ def get_comparison_schema() -> types.Schema:
             ),
             "confidence": types.Schema(type=types.Type.NUMBER),
             "region": types.Schema(type=types.Type.STRING),
+            "bounding_box": bounding_box,
         },
-        required=["element", "text", "diff_type", "sub_type", "figma_value", "web_value", "delta", "severity", "confidence", "region"],
+        required=["element", "text", "diff_type", "sub_type", "figma_value", "web_value", "delta", "severity", "confidence", "region", "bounding_box"],
     )
     
     return types.Schema(
@@ -183,6 +217,17 @@ def get_comparison_schema() -> types.Schema:
 
 def get_validation_schema() -> types.Schema:
     """Build Gemini schema for Pass 3 (Validation) response."""
+    bounding_box = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "x": types.Schema(type=types.Type.INTEGER),
+            "y": types.Schema(type=types.Type.INTEGER),
+            "width": types.Schema(type=types.Type.INTEGER),
+            "height": types.Schema(type=types.Type.INTEGER),
+        },
+        required=["x", "y", "width", "height"],
+    )
+    
     diff_item = types.Schema(
         type=types.Type.OBJECT,
         properties={
@@ -202,8 +247,9 @@ def get_validation_schema() -> types.Schema:
             ),
             "confidence": types.Schema(type=types.Type.NUMBER),
             "region": types.Schema(type=types.Type.STRING),
+            "bounding_box": bounding_box,
         },
-        required=["element", "text", "diff_type", "sub_type", "figma_value", "web_value", "delta", "severity", "confidence", "region"],
+        required=["element", "text", "diff_type", "sub_type", "figma_value", "web_value", "delta", "severity", "confidence", "region", "bounding_box"],
     )
     
     return types.Schema(

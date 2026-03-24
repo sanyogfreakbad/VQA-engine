@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app.schemas import (
+    BoundingBox,
     CategoryDiffItem,
     CompareAPIResponse,
     ComparisonResponse,
@@ -34,6 +35,7 @@ from app.schemas import (
     get_comparison_schema,
     get_validation_schema,
 )
+from app.image_annotator import annotate_image
 from app.gemini_client import call_gemini_vision
 from app.image_utils import preprocess
 from app.prompts.inventory import INVENTORY_SYSTEM, INVENTORY_USER
@@ -58,6 +60,7 @@ async def run_comparison(
     figma_raw: bytes,
     web_raw: bytes,
     *,
+    skip_inventory: bool = False,
     skip_validation: bool = False,
     skip_cache: bool = False,
 ) -> CompareAPIResponse:
@@ -69,10 +72,20 @@ async def run_comparison(
     - Caching for identical image pairs
     - Parallel validation across regions
     - Configurable confidence thresholds
+    - Annotated web image with diff markers
+    
+    Args:
+        skip_inventory: Skip Pass 1 (inventory) for faster results (default: True)
+        skip_validation: Skip Pass 3 (validation) for faster results
+        skip_cache: Bypass cache and force fresh comparison
     """
     settings = get_settings()
     stats = PipelineStats()
     cache = get_cache()
+    
+    # ── Generate comparison_id early ──────────────────────────────────────
+    comparison_id = cache.hash_images(figma_raw, web_raw)
+    logger.info("Comparison ID: %s", comparison_id[:16])
     
     # ── Check cache ───────────────────────────────────────────────────────
     if settings.cache_enabled and not skip_cache:
@@ -89,18 +102,22 @@ async def run_comparison(
         asyncio.to_thread(preprocess, web_raw),
     )
 
-    # ── Pass 1: Inventory ─────────────────────────────────────────────────
-    logger.info("Pass 1 — Element inventory")
-    inv_raw = await call_gemini_vision(
-        system_prompt=INVENTORY_SYSTEM,
-        user_prompt=INVENTORY_USER,
-        figma_png=figma_png,
-        web_png=web_png,
-        response_schema=get_inventory_schema(),
-    )
-    inventory, dropped = _parse_inventory(inv_raw)
-    stats.dropped_inventory_items = dropped
-    logger.info("  Found %d elements (%d dropped)", len(inventory), len(dropped))
+    # ── Pass 1: Inventory (optional) ──────────────────────────────────────
+    inventory: list[InventoryItem] = []
+    if not skip_inventory:
+        logger.info("Pass 1 — Element inventory")
+        inv_raw = await call_gemini_vision(
+            system_prompt=INVENTORY_SYSTEM,
+            user_prompt=INVENTORY_USER,
+            figma_png=figma_png,
+            web_png=web_png,
+            response_schema=get_inventory_schema(),
+        )
+        inventory, dropped = _parse_inventory(inv_raw)
+        stats.dropped_inventory_items = dropped
+        logger.info("  Found %d elements (%d dropped)", len(inventory), len(dropped))
+    else:
+        logger.info("Pass 1 — Skipped (fast mode)")
 
     # ── Pass 2: Detailed comparison ───────────────────────────────────────
     logger.info("Pass 2 — Detailed comparison")
@@ -149,7 +166,9 @@ async def run_comparison(
     
     # Group diffs by category (diff_type) for easier table mapping
     by_category: dict[str, list[CategoryDiffItem]] = {}
+    diff_id_counter = 0
     for d in diffs:
+        diff_id_counter += 1
         category = d.diff_type.value if hasattr(d.diff_type, 'value') else str(d.diff_type)
         if category not in by_category:
             by_category[category] = []
@@ -161,14 +180,37 @@ async def run_comparison(
             web_value=d.web_value,
             delta=d.delta,
             severity=d.severity,
+            diff_id=diff_id_counter,
+            bounding_box=d.bounding_box,
         ))
 
+    # ── Create annotated image ────────────────────────────────────────────
+    annotations: list[tuple[int, BoundingBox]] = []
+    for idx, d in enumerate(diffs, start=1):
+        if d.bounding_box is not None:
+            annotations.append((idx, d.bounding_box))
+    
+    annotated_image_path: Optional[str] = None
+    if annotations:
+        logger.info("Creating annotated image with %d markers", len(annotations))
+        try:
+            annotated_bytes = await asyncio.to_thread(
+                annotate_image, web_png, annotations
+            )
+            cache.set_annotated_image(comparison_id, annotated_bytes)
+            annotated_image_path = f"/compare/{comparison_id}/image"
+            logger.info("Annotated image stored")
+        except Exception as exc:
+            logger.warning("Failed to create annotated image: %s", exc)
+
     result = CompareAPIResponse(
+        comparison_id=comparison_id,
         total_diffs=len(diffs),
         by_severity={k: severity_counts.get(k, 0) for k in ("critical", "major", "minor")},
         by_type=dict(type_counts),
         by_category=by_category,
         summary=comparison.summary,
+        annotated_image=annotated_image_path,
     )
     
     # ── Cache result ──────────────────────────────────────────────────────

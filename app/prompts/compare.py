@@ -17,21 +17,69 @@ You NEVER guess vaguely — you always give concrete px / hex / weight values.""
 
 
 def build_compare_prompt(inventory: list[InventoryItem]) -> str:
-    inventory_json = json.dumps(
-        [item.model_dump() for item in inventory], indent=2
-    )
+    if inventory:
+        inventory_json = json.dumps(
+            [item.model_dump() for item in inventory], indent=2
+        )
+        inventory_section = f"""
+Here is the element inventory from a previous analysis pass:
+{inventory_json}
+"""
+    else:
+        inventory_section = """
+FIRST, systematically scan BOTH images to inventory ALL UI elements.
+"""
 
     return f"""\
 You are given TWO screenshots of the same page:
   • IMAGE 1 → FIGMA DESIGN  (source of truth)
   • IMAGE 2 → LIVE WEBPAGE   (implementation to verify)
+{inventory_section}
+─────────────────────────────────────────────
+⚠️ CRITICAL: SYSTEMATIC ELEMENT SCAN
+─────────────────────────────────────────────
 
-Here is the element inventory from a previous analysis pass:
-{inventory_json}
+Before comparing, SCAN the Figma design (IMAGE 1) region by region:
+
+1. HEADER REGION (top bar):
+   □ Logo / brand name
+   □ Navigation icons (menu, notifications, user avatar)
+   □ Action buttons (Create, Add, New, etc.)
+   □ Icons INSIDE buttons (+ plus icons, arrows, etc.)
+
+2. FILTER / TOOLBAR REGION:
+   □ Search inputs and their icons
+   □ Filter dropdowns
+   □ Date pickers
+   □ Status filters
+   □ Clear/Apply buttons
+
+3. TABLE HEADER:
+   □ Column headers and labels
+   □ Sort indicators
+   □ Checkbox columns
+
+4. TABLE BODY:
+   □ Row styling (alternating colors, hover states)
+   □ Cell content and alignment
+   □ Status badges/chips
+   □ Action menus (3-dot icons)
+   □ Links vs plain text
+
+5. PAGINATION:
+   □ Page numbers
+   □ Items per page selector
+   □ Navigation arrows
+
+6. SIDEBAR (if present):
+   □ Menu items
+   □ Icons
+
+For EACH element in Figma, check if it exists in the web implementation.
+Report ANY element that is MISSING or DIFFERENT.
 
 ─────────────────────────────────────────────
-TASK: Compare every element that exists in BOTH images.
-Report ONLY the DIFFERENCES. Skip properties that match.
+TASK: Report ALL DIFFERENCES between Figma and Web.
 ─────────────────────────────────────────────
 
 CHECK THESE 8 CATEGORIES for every element:
@@ -95,6 +143,32 @@ CONFIDENCE:
   0.50–0.69  subtle, might be screenshot artifact
 
 ─────────────────────────────────────────────
+BOUNDING BOX (for annotation) — BE PRECISE:
+  For each diff, provide the bounding_box of the element in the WEB image (IMAGE 2).
+  Use a normalized coordinate system from 0 to 1000:
+    • x: left edge position (0 = left edge of image, 1000 = right edge)
+    • y: top edge position (0 = top edge of image, 1000 = bottom edge)
+    • width: element width in the same 0-1000 scale
+    • height: element height in the same 0-1000 scale
+
+  REFERENCE POINTS for typical 1440px wide UI:
+    • Sidebar left edge: x ≈ 0, width ≈ 50-70
+    • Main content left edge: x ≈ 50-70
+    • Header/top bar: y ≈ 0-50, height ≈ 40-60
+    • Action buttons (top-right): x ≈ 850-950
+    • Filter row: y ≈ 80-150
+    • Table header: y ≈ 150-200
+    • Table rows: each row height ≈ 40-50
+    • Pagination: y ≈ 900-950
+  
+  EXAMPLES:
+    • "Create ASN" button (top-right): {{"x": 880, "y": 70, "width": 100, "height": 35}}
+    • Filter input (first): {{"x": 70, "y": 100, "width": 120, "height": 35}}
+    • Table cell (row 1, col 1): {{"x": 70, "y": 180, "width": 100, "height": 40}}
+  
+  For MISSING elements, estimate where it SHOULD appear based on Figma layout.
+
+─────────────────────────────────────────────
 OUTPUT FORMAT — respond with ONLY this JSON (no markdown, no backticks):
 
 {{
@@ -109,20 +183,42 @@ OUTPUT FORMAT — respond with ONLY this JSON (no markdown, no backticks):
       "delta": "human-readable diff (e.g. +8px, 700→400, #1a1a1a→#333)",
       "severity": "critical|major|minor",
       "confidence": 0.85,
-      "region": "header|filters|table_header|table_body|pagination|actions|sidebar"
+      "region": "header|filters|table_header|table_body|pagination|actions|sidebar",
+      "bounding_box": {{"x": 100, "y": 50, "width": 200, "height": 40}}
     }}
   ],
   "summary": "1-2 sentence plain-English overview of key findings"
 }}
 
-IMPORTANT:
-  • FIGMA IS THE SOURCE OF TRUTH. Report only deviations of web FROM Figma.
-  • Do NOT report "missing-in-figma" — we only care about what's in Figma but missing/different in web.
-  • Be precise. "Font looks different" is NOT acceptable.
-    Say "font-weight: 700 vs 400" or "font-family: Montserrat vs system sans-serif".
-  • Always give estimated px / hex / numeric values.
-  • delta must show the math: "+8px", "700 → 600", "#1a1a1a → #333333".
-  • Do NOT report anti-aliasing or sub-pixel rendering artefacts.
-  • Do NOT hallucinate elements. If you cannot clearly see a property, set confidence < 0.6.
-  • For MISSING elements (in web), set web_value to "N/A" and figma_value to the expected value.
+⚠️ CRITICAL RULES — READ CAREFULLY:
+
+1. FIGMA IS THE SOURCE OF TRUTH. Report deviations of web FROM Figma.
+
+2. DO NOT MISS ELEMENTS! Check these commonly missed items:
+   □ Action buttons (Create, Add, New, Save, Cancel)
+   □ Icons INSIDE buttons (+ plus signs, arrows, icons)
+   □ Header icons (notifications, settings, user menu)
+   □ Filter clear/reset buttons
+   □ Table action menus (3-dot icons per row)
+   □ Pagination controls
+   □ Status badges with different colors
+
+3. For MISSING elements:
+   • diff_type = "missing"
+   • sub_type = "missing-in-web"
+   • web_value = "N/A"
+   • figma_value = describe what's in Figma
+   • Provide bounding_box where it SHOULD be in web
+
+4. Be PRECISE with values:
+   • Font: "font-weight: 700 vs 400" not "font looks different"
+   • Color: "#1a1a1a vs #333333" not "darker"
+   • Size: "height: 40px vs 32px" not "smaller"
+
+5. Do NOT report:
+   • Anti-aliasing or rendering artifacts
+   • Elements that exist in web but not Figma
+   • Differences you're not confident about (set confidence < 0.6)
+
+6. BOUNDING BOX must be accurate — it will be drawn on the image!
 """
