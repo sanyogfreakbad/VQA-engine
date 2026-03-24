@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app.schemas import (
+    CategoryDiffItem,
     CompareAPIResponse,
     ComparisonResponse,
     DiffItem,
@@ -145,12 +146,28 @@ async def run_comparison(
     # ── Build response ────────────────────────────────────────────────────
     severity_counts = Counter(d.severity for d in diffs)
     type_counts = Counter(d.diff_type for d in diffs)
+    
+    # Group diffs by category (diff_type) for easier table mapping
+    by_category: dict[str, list[CategoryDiffItem]] = {}
+    for d in diffs:
+        category = d.diff_type.value if hasattr(d.diff_type, 'value') else str(d.diff_type)
+        if category not in by_category:
+            by_category[category] = []
+        by_category[category].append(CategoryDiffItem(
+            element=d.element,
+            text=d.text,
+            sub_type=d.sub_type,
+            figma_value=d.figma_value,
+            web_value=d.web_value,
+            delta=d.delta,
+            severity=d.severity,
+        ))
 
     result = CompareAPIResponse(
         total_diffs=len(diffs),
         by_severity={k: severity_counts.get(k, 0) for k in ("critical", "major", "minor")},
         by_type=dict(type_counts),
-        diffs=diffs,
+        by_category=by_category,
         summary=comparison.summary,
     )
     

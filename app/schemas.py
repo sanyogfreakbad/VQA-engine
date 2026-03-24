@@ -79,12 +79,26 @@ class ComparisonResponse(BaseModel):
 # ── Final API Response ────────────────────────────────────────────────────────
 
 
+class CategoryDiffItem(BaseModel):
+    """Simplified diff item for category grouping (excludes diff_type since it's the key)."""
+    element: str = Field(description="Element name / identifier")
+    text: str = Field(description="Visible text or short description")
+    sub_type: str = Field(description="Specific CSS-like property, e.g. font-weight, padding-top, width")
+    figma_value: str = Field(description="Value observed in the Figma screenshot")
+    web_value: str = Field(description="Value observed in the web screenshot")
+    delta: str = Field(description="Human-readable difference, e.g. '+8px', '700 → 400'")
+    severity: Severity
+
+
 class CompareAPIResponse(BaseModel):
     """What the /compare endpoint returns."""
     total_diffs: int
     by_severity: dict[str, int] = Field(description="Count per severity level")
     by_type: dict[str, int] = Field(description="Count per diff type")
-    diffs: list[DiffItem]
+    by_category: dict[str, list[CategoryDiffItem]] = Field(
+        default_factory=dict, 
+        description="Diffs grouped by diff_type for easier table mapping"
+    )
     summary: str
 
 
